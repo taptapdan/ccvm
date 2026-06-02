@@ -86,13 +86,30 @@ Edit `claude-vm.conf`, then re-run `./setup_claude_code`.
 
 ## Network security
 
-**Default-deny, enforced on your Mac.** The VM's only route out is the Squid
-proxy on your Mac; Squid allows only the domains in `claude-vm.conf` (plus any
-proxy-credential domains) and refuses everything else. Because enforcement runs
-on the Mac, a process inside the VM — even as root — cannot rewrite the policy.
+Two layers, both enforced on your Mac where VM root can't touch them.
 
-`pf` on the Mac is a backstop that drops VM traffic attempting to reach the
-internet by raw IP (bypassing the proxy by not using a hostname).
+**Layer 1 — Squid proxy (primary, domain-aware enforcer).**
+The VM's tools are configured to route all traffic through Squid on your Mac
+(`host.lima.internal:3128`). Squid allows only the domains in `claude-vm.conf`
+and refuses everything else. Effective against any tool that honors the proxy
+env (Claude Code, npm, pip, git, curl, docker pull).
+
+**Layer 2 — pf firewall (backstop against raw-IP bypass).**
+`socket_vmnet` puts the VM on a kernel-visible bridge interface. pf rules on
+that bridge drop traffic from the VM's subnet (`192.168.105.0/24`) to anywhere
+except the Squid proxy port and Lima's DNS resolver. Even a process that
+deliberately bypasses the proxy env and connects to a raw IP is dropped here,
+before NAT, before the packet can leave your Mac.
+
+**Why socket_vmnet matters:** Lima's default `usernet` mode routes VM traffic
+through Lima's own userspace process, so pf never sees the VM's source IPs —
+the backstop can't work. `socket_vmnet` creates a real kernel bridge; pf sees
+the VM's IPs and can filter on them. The Lima sudoers entry lets Lima manage
+this interface without prompting for a password on every VM start.
+
+**Your Mac's traffic is never affected.** The pf rules match only on source
+addresses in `192.168.105.0/24` (the VM's subnet). Your Mac's traffic has a
+different source address and is never touched by these rules.
 
 The allowlist convention: `.example.com` matches the domain and all subdomains;
 `host.example.com` matches that exact host. The `PROTECTED_DOMAINS` block
@@ -102,6 +119,15 @@ Watch what the VM is reaching (including blocked attempts):
 
 ```bash
 tail -f ~/.claude-vm/squid-access.log
+```
+
+To remove the pf rules completely (e.g. if you no longer use the VM):
+
+```bash
+sudo pfctl -a cc-vm -F all
+sudo sed -i '' '/cc-vm/d' /etc/pf.conf
+sudo launchctl unload /Library/LaunchDaemons/com.claudevm.pf.plist
+sudo rm /Library/LaunchDaemons/com.claudevm.pf.plist
 ```
 
 ---
@@ -218,6 +244,8 @@ Likely first-run adjustments:
 - Intel Mac, macOS 13.0 (Ventura) or later
 - Paid Anthropic plan (Pro / Max / Team / Enterprise / Console)
 - ~10 GB free disk
+- Homebrew (the setup script installs it if missing; `socket_vmnet`, `lima`,
+  and `squid` are installed automatically from Homebrew)
 
 ## Useful commands
 
