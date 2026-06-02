@@ -93,6 +93,7 @@ paths:
   socketVMNet: /opt/socket_vmnet/bin/socket_vmnet
   varRun: /private/var/run/lima
   sudoers: /private/etc/sudoers.d/lima
+group: everyone
 networks:
   shared:
     mode: shared
