@@ -74,14 +74,18 @@ SVMNET_DIR_REAL="$(dirname "$SVMNET_BIN_REAL")"
 [ -f "$SVMNET_BIN_REAL" ] || die "Resolved socket_vmnet path not found: $SVMNET_BIN_REAL"
 log "socket_vmnet resolved path: $SVMNET_BIN_REAL"
 
-# Chown the real binary and its real parent directory.
+# Lima checks ownership of the binary, its bin dir, and the package root dir
+# (three levels). Chown all three.
+SVMNET_PKG_REAL="$(dirname "$SVMNET_DIR_REAL")"   # e.g. .../Cellar/socket_vmnet/1.2.2
 NEEDS_CHOWN="false"
-[ "$(stat -f '%u' "$SVMNET_BIN_REAL")" != "0" ] && NEEDS_CHOWN="true"
-[ "$(stat -f '%u' "$SVMNET_DIR_REAL")" != "0" ] && NEEDS_CHOWN="true"
+[ "$(stat -f '%u' "$SVMNET_BIN_REAL")"  != "0" ] && NEEDS_CHOWN="true"
+[ "$(stat -f '%u' "$SVMNET_DIR_REAL")"  != "0" ] && NEEDS_CHOWN="true"
+[ "$(stat -f '%u' "$SVMNET_PKG_REAL")"  != "0" ] && NEEDS_CHOWN="true"
 if [ "$NEEDS_CHOWN" = "true" ]; then
-  log "Setting root ownership on socket_vmnet binary and bin dir (required by Lima)..."
-  sudo chown root:wheel "$SVMNET_BIN_REAL"
+  log "Setting root ownership on socket_vmnet binary, bin dir, and pkg dir (required by Lima)..."
+  sudo chown root:wheel "$SVMNET_PKG_REAL"
   sudo chown root:wheel "$SVMNET_DIR_REAL"
+  sudo chown root:wheel "$SVMNET_BIN_REAL"
 fi
 
 LIMA_CONFIG_DIR="$HOME/.lima/_config"
