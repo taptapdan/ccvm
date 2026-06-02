@@ -66,12 +66,18 @@ SVMNET_BIN="$(brew --prefix socket_vmnet)/bin/socket_vmnet"
 SVMNET_SOCK_DIR="$(brew --prefix socket_vmnet)/var/run"
 [ -f "$SVMNET_BIN" ] || die "socket_vmnet binary not found at $SVMNET_BIN"
 
-# Lima requires the socket_vmnet binary to be owned by root — it runs with
-# elevated privileges to manage the vmnet interface and refuses to proceed
-# if the binary is owned by a non-root user (privilege escalation guard).
-if [ "$(stat -f '%u' "$SVMNET_BIN")" != "0" ]; then
-  log "Setting root ownership on socket_vmnet binary (required by Lima)..."
+# Lima requires both the socket_vmnet binary AND its parent directory to be
+# root-owned. Homebrew installs both owned by the current user; chown them
+# so limactl sudoers succeeds. chown follows symlinks on macOS, so this
+# correctly targets the real Cellar paths under /usr/local/opt/socket_vmnet.
+SVMNET_DIR="$(dirname "$SVMNET_BIN")"
+NEEDS_CHOWN="false"
+[ "$(stat -f '%u' "$SVMNET_BIN")"  != "0" ] && NEEDS_CHOWN="true"
+[ "$(stat -f '%u' "$SVMNET_DIR")"  != "0" ] && NEEDS_CHOWN="true"
+if [ "$NEEDS_CHOWN" = "true" ]; then
+  log "Setting root ownership on socket_vmnet binary and bin dir (required by Lima)..."
   sudo chown root:wheel "$SVMNET_BIN"
+  sudo chown root:wheel "$SVMNET_DIR"
 fi
 
 LIMA_CONFIG_DIR="$HOME/.lima/_config"
