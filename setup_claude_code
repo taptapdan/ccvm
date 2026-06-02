@@ -52,8 +52,9 @@ if ! command -v brew >/dev/null 2>&1; then
   eval "$(/usr/local/bin/brew shellenv 2>/dev/null || true)"
 fi
 command -v brew    >/dev/null 2>&1 || die "Homebrew not on PATH. Open a new terminal and re-run."
-command -v limactl >/dev/null 2>&1 || { log "Installing Lima...";  brew install lima; }
-command -v squid   >/dev/null 2>&1 || { log "Installing Squid..."; brew install squid; }
+command -v limactl           >/dev/null 2>&1 || { log "Installing Lima...";  brew install lima; }
+command -v squid              >/dev/null 2>&1 || { log "Installing Squid..."; brew install squid; }
+command -v qemu-system-x86_64 >/dev/null 2>&1 || { log "Installing QEMU...";  brew install qemu; }
 
 # 1a. socket_vmnet — must be installed from SOURCE to /opt/socket_vmnet.
 # ----------------------------------------------------------------------------
