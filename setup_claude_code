@@ -66,6 +66,14 @@ SVMNET_BIN="$(brew --prefix socket_vmnet)/bin/socket_vmnet"
 SVMNET_SOCK_DIR="$(brew --prefix socket_vmnet)/var/run"
 [ -f "$SVMNET_BIN" ] || die "socket_vmnet binary not found at $SVMNET_BIN"
 
+# Lima requires the socket_vmnet binary to be owned by root — it runs with
+# elevated privileges to manage the vmnet interface and refuses to proceed
+# if the binary is owned by a non-root user (privilege escalation guard).
+if [ "$(stat -f '%u' "$SVMNET_BIN")" != "0" ]; then
+  log "Setting root ownership on socket_vmnet binary (required by Lima)..."
+  sudo chown root:wheel "$SVMNET_BIN"
+fi
+
 LIMA_CONFIG_DIR="$HOME/.lima/_config"
 mkdir -p "$LIMA_CONFIG_DIR"
 LIMA_NETWORKS_YAML="$LIMA_CONFIG_DIR/networks.yaml"
