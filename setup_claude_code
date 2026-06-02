@@ -106,7 +106,10 @@ log "Lima networks.yaml written."
 log "Installing Lima sudoers entry for socket_vmnet..."
 SUDOERS_TMP="$(mktemp)"
 limactl sudoers > "$SUDOERS_TMP"
-sudo install -o root -m 440 "$SUDOERS_TMP" /private/etc/sudoers.d/lima
+# No -m flag: default mode 0755 is world-readable (Lima reads it as the
+# current user) and has no write bits for group/others (sudo accepts it).
+# All Lima and socket_vmnet docs use this exact form.
+sudo install -o root "$SUDOERS_TMP" /etc/sudoers.d/lima
 rm -f "$SUDOERS_TMP"
 log "Lima sudoers installed."
 
