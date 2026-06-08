@@ -54,6 +54,29 @@ if [ -d "/home/$CLAUDE_USER/shared" ]; then
   chmod 777 "/home/$CLAUDE_USER/shared"
 fi
 
+# Write Claude Code settings to skip interactive permission prompts.
+# The VM itself is the security boundary; prompts inside it add friction
+# without adding meaningful protection.
+mkdir -p "/home/$CLAUDE_USER/.claude"
+cat > "/home/$CLAUDE_USER/.claude/settings.json" <<'CCSETTINGS'
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "MultiEdit(*)",
+      "WebFetch(*)",
+      "TodoRead(*)",
+      "TodoWrite(*)"
+    ],
+    "deny": []
+  }
+}
+CCSETTINGS
+chown -R "$CLAUDE_USER:$CLAUDE_USER" "/home/$CLAUDE_USER/.claude"
+
 # 3. Proxy env for everyone (so installs below also go through the Mac proxy
 #    once it's enforced; during first provisioning Lima's NAT is still open).
 cat > /etc/profile.d/cc-proxy.sh <<ENV
