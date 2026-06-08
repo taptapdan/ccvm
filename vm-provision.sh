@@ -40,10 +40,12 @@ if ! id "$CLAUDE_USER" >/dev/null 2>&1; then
   log "Creating user '$CLAUDE_USER'..."
   useradd -m -s /bin/bash "$CLAUDE_USER"
 fi
-# Lima pre-creates /home/claude (as root) when setting up the shared mount point.
-# Ensure the user owns their home directory regardless of how it was created.
-# Chown only the home dir itself — not recursively, as the shared submount
-# contains Mac-owned files that cannot be chowned from inside the VM.
+# Lima pre-creates /home/claude (as root) for the shared mount, so useradd
+# warns and skips skel files (.bashrc, .profile etc.). Copy them if missing.
+for _f in .bashrc .bash_logout .profile; do
+  [ -f "/home/$CLAUDE_USER/$_f" ] || cp "/etc/skel/$_f" "/home/$CLAUDE_USER/$_f" 2>/dev/null || true
+done
+# Chown the home dir and dotfiles; skip the shared submount (Mac-owned).
 chown "$CLAUDE_USER:$CLAUDE_USER" "/home/$CLAUDE_USER"
 install -d -o "$CLAUDE_USER" -g "$CLAUDE_USER" "/home/$CLAUDE_USER/projects"
 # The shared folder is a 9p mount owned by the Mac user (different uid from claude).
@@ -61,6 +63,8 @@ export http_proxy="${PROXY}"
 export https_proxy="${PROXY}"
 export NO_PROXY="localhost,127.0.0.1,::1,host.lima.internal"
 export no_proxy="localhost,127.0.0.1,::1,host.lima.internal"
+# Ensure ~/.local/bin (where claude binary lives) is always on PATH
+export PATH="\$HOME/.local/bin:\$PATH"
 ENV
 chmod 644 /etc/profile.d/cc-proxy.sh
 
