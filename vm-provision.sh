@@ -35,12 +35,22 @@ log "Installing base packages..."
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl gnupg git sudo >/dev/null
 
-# 2. Non-root claude user
+# Non-root claude user
 if ! id "$CLAUDE_USER" >/dev/null 2>&1; then
   log "Creating user '$CLAUDE_USER'..."
   useradd -m -s /bin/bash "$CLAUDE_USER"
 fi
+# Lima pre-creates /home/claude (as root) when setting up the shared mount point.
+# Ensure the user owns their home directory regardless of how it was created.
+# Chown only the home dir itself — not recursively, as the shared submount
+# contains Mac-owned files that cannot be chowned from inside the VM.
+chown "$CLAUDE_USER:$CLAUDE_USER" "/home/$CLAUDE_USER"
 install -d -o "$CLAUDE_USER" -g "$CLAUDE_USER" "/home/$CLAUDE_USER/projects"
+# The shared folder is a 9p mount owned by the Mac user (different uid from claude).
+# chmod 777 here sets the in-VM permissions so claude can read and write it.
+if [ -d "/home/$CLAUDE_USER/shared" ]; then
+  chmod 777 "/home/$CLAUDE_USER/shared"
+fi
 
 # 3. Proxy env for everyone (so installs below also go through the Mac proxy
 #    once it's enforced; during first provisioning Lima's NAT is still open).

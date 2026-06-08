@@ -224,6 +224,10 @@ echo "  - location: \"${SCRIPT_DIR}\""
 echo "    mountPoint: \"/tmp/cc-setup\""
 echo "    writable: false"
 if [ -n "$SHARED_DIR" ]; then
+  mkdir -p "$SHARED_DIR"
+  # 9p mounts pass uids through directly. claude (uid 1000 in VM) differs from
+  # your Mac uid, so chmod 777 lets the claude user read and write the folder.
+  chmod 777 "$SHARED_DIR"
   echo "  - location: \"${SHARED_DIR}\""
   echo "    mountPoint: \"/home/claude/shared\""
   echo "    writable: ${SHARED_WRITABLE}"
