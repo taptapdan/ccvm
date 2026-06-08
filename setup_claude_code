@@ -117,10 +117,24 @@ log "Lima sudoers installed."
 
 # ----------------------------------------------------------------------------
 # 2. Build the merged allowlist
+#    PROVISIONING_DOMAINS are always included so the in-VM provisioner can
+#    install apt packages and Docker through the Squid proxy.
 # ----------------------------------------------------------------------------
+PROVISIONING_DOMAINS=( \
+  "archive.ubuntu.com" \
+  "security.ubuntu.com" \
+  "esm.ubuntu.com" \
+  "get.docker.com" \
+  "download.docker.com" \
+  ".docker.com" \
+  "deb.nodesource.com" \
+  "keyserver.ubuntu.com" \
+  "ppa.launchpad.net" \
+)
 ALLOWLIST="$STATE_DIR/allowed_domains.txt"
 {
   printf '%s\n' "${PROTECTED_DOMAINS[@]}"
+  printf '%s\n' "${PROVISIONING_DOMAINS[@]}"
   printf '%s\n' "${ALLOWED_DOMAINS[@]}"
   [ -f "$STATE_DIR/proxy_domains.txt" ] && cat "$STATE_DIR/proxy_domains.txt" || true
 } | sed '/^$/d' | sort -u > "$ALLOWLIST"
@@ -237,18 +251,48 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 6. Flush any existing cc-vm pf rules so the provisioner (step 7) can reach
-#    the internet. pf is re-applied after provisioning completes (step 8).
-#    This keeps provisioning open (a trusted admin operation) while ensuring
-#    pf is in place for all Claude Code runtime sessions.
+# 6. Ensure socket_vmnet NAT works: unblock bootpd in macOS Application Firewall
+#
+#    socket_vmnet's shared-mode NAT depends on macOS's bootpd daemon for routing.
+#    If bootpd is blocked by the Application Firewall, the VM gets a DHCP address
+#    (vmnet.framework handles DHCP directly) but TCP connections to the internet
+#    time out (NAT forwarding fails). This is the documented fix from both the
+#    Lima VMNet docs and the socket_vmnet README.
+#    Reference: https://lima-vm.io/docs/config/network/vmnet/
 # ----------------------------------------------------------------------------
-# Disable pf entirely during provisioning so socket_vmnet's NAT works.
-# When pf is enabled it intercepts all packets; the default com.apple anchor
-# rules do not include NAT for socket_vmnet's subnet, so the VM loses internet
-# access even after flushing the cc-vm anchor. Disabling pf fully restores the
-# socket_vmnet NAT path. pf is re-enabled with our rules after provisioning.
-log "Disabling pf during provisioning window (re-enabled after provisioning)..."
-sudo pfctl -d 2>/dev/null || true
+log "Unblocking bootpd in macOS Application Firewall (required for socket_vmnet NAT)..."
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --remove /usr/libexec/bootpd 2>/dev/null || true
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add    /usr/libexec/bootpd 2>/dev/null || true
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /usr/libexec/bootpd 2>/dev/null || true
+
+# Restore /etc/pf.conf if we modified it in a previous run (our pf changes
+# interfere with the com.apple.internet-sharing NAT anchor that socket_vmnet
+# relies on). We remove our pf anchor entirely and rely on Squid (the proxy)
+# as the network enforcer, which is the primary layer regardless.
+PF_CONF="/etc/pf.conf"
+if sudo grep -q "cc-vm" "$PF_CONF" 2>/dev/null; then
+  log "Restoring original /etc/pf.conf (removing cc-vm anchor that breaks socket_vmnet NAT)..."
+  if [ -f "${PF_CONF}.before-ccvm" ]; then
+    sudo cp "${PF_CONF}.before-ccvm" "$PF_CONF"
+    sudo pfctl -f "$PF_CONF" 2>/dev/null || true
+    log "Restored original pf.conf."
+  else
+    sudo sed -i '' '/# Claude Code VM sandbox anchor/,/load anchor "cc-vm"/d' "$PF_CONF" 2>/dev/null || true
+    log "Removed cc-vm anchor references from pf.conf."
+  fi
+fi
+
+# Restart the VM so socket_vmnet picks up the bootpd firewall change.
+# (The daemon must be restarted; changes to the Application Firewall take
+# effect for new daemon starts, not for already-running processes.)
+if limactl list -q 2>/dev/null | grep -qx "$VM_NAME"; then
+  STATUS="$(limactl list --format '{{.Status}}' "$VM_NAME" 2>/dev/null || echo Unknown)"
+  if [ "$STATUS" = "Running" ]; then
+    log "Restarting VM so socket_vmnet daemon picks up the bootpd firewall fix..."
+    limactl stop "$VM_NAME"
+    limactl start "$VM_NAME"
+  fi
+fi
 
 # ----------------------------------------------------------------------------
 # 7. Push allowlist + provisioner into the VM and run it (idempotent)
@@ -267,107 +311,16 @@ limactl shell --workdir /tmp "$VM_NAME" -- sudo bash /root/vm-provision.sh \
   "INSTALL_GCLOUD=${INSTALL_GCLOUD}"
 
 # ----------------------------------------------------------------------------
-# 8. pf backstop: block VM raw-IP egress via the socket_vmnet bridge interface
-#    Applied AFTER provisioning so installs are not blocked.
-#    socket_vmnet puts the VM on a real kernel bridge. pf sees traffic FROM
-#    the VM with source IPs in 192.168.105.0/24 BEFORE NAT, so we can match
-#    and drop traffic that isn't heading to the proxy or Lima's DNS resolver.
-#    Your Mac's own traffic (source: your Mac's IP) never matches these rules.
+# 8. Network enforcement note
+#    The primary network enforcer is Squid (the filtering proxy on your Mac).
+#    All traffic from the VM routes through it via HTTP_PROXY env in the VM.
+#    pf is intentionally not used here: loading pf rules interferes with the
+#    com.apple.internet-sharing NAT anchor that socket_vmnet relies on, causing
+#    the VM to lose internet access. Squid provides domain-level allowlist
+#    enforcement; the VM filesystem isolation (step 5) is the primary security
+#    boundary and does not depend on networking at all.
 # ----------------------------------------------------------------------------
-if [ "$NEEDS_RECREATE" != "skipped" ]; then
-  log "Detecting Lima shared network bridge interface..."
-  # Give socket_vmnet a moment to create the bridge after VM starts.
-  sleep 3
-  BRIDGE_IF="$(ifconfig 2>/dev/null \
-    | grep -B5 "inet ${LIMA_SHARED_GW} " \
-    | grep -E '^[a-z]' | tail -1 | cut -d: -f1 || true)"
-
-  if [ -z "$BRIDGE_IF" ]; then
-    warn "Could not detect Lima bridge interface automatically."
-    warn "Look for the interface with 'inet ${LIMA_SHARED_GW}' in: ifconfig"
-    warn "Then set it manually in the pf anchor: ${STATE_DIR}/pf-cc-vm.conf"
-    warn "Squid remains the active enforcer in the meantime."
-  else
-    log "Lima bridge interface: ${BRIDGE_IF}  VM subnet: ${LIMA_SHARED_SUBNET}"
-
-    # Write the pf anchor rules.
-    PF_ANCHOR_FILE="$STATE_DIR/pf-cc-vm.conf"
-    cat > "$PF_ANCHOR_FILE" <<PF
-# cc-vm pf anchor — generated by setup_claude_code; do not edit by hand.
-# Restricts outbound traffic from the VM subnet ${LIMA_SHARED_SUBNET}.
-# Matches ONLY traffic from the VM subnet on the Lima bridge (${BRIDGE_IF}).
-# Your Mac's own traffic is NEVER matched by these rules.
-
-table <cc_vm_subnet> persist { ${LIMA_SHARED_SUBNET} }
-
-# Allow traffic to Lima's DNS resolver (Lima resolves DNS for the VM).
-pass in quick on ${BRIDGE_IF} proto { tcp udp } \
-  from <cc_vm_subnet> to ${LIMA_SHARED_GW} port 53
-
-# Allow VM to reach Squid on the Mac (the only permitted egress path).
-pass in quick on ${BRIDGE_IF} proto tcp \
-  from <cc_vm_subnet> to ${LIMA_SHARED_GW} port ${PROXY_PORT}
-
-# Allow return traffic for already-established connections.
-pass in quick on ${BRIDGE_IF} from <cc_vm_subnet> keep state
-
-# Drop everything else from the VM subnet.
-# This is the backstop: even raw-IP connections are blocked here.
-block in quick on ${BRIDGE_IF} from <cc_vm_subnet> to any
-PF
-
-    # Install the anchor reference into /etc/pf.conf (idempotent).
-    PF_CONF="/etc/pf.conf"
-    PF_ANCHOR_REF='anchor "cc-vm"'
-    PF_ANCHOR_LOAD="load anchor \"cc-vm\" from \"${PF_ANCHOR_FILE}\""
-    if ! sudo grep -q "cc-vm" "$PF_CONF" 2>/dev/null; then
-      log "Adding cc-vm anchor to $PF_CONF (backs up original first)..."
-      sudo cp "$PF_CONF" "${PF_CONF}.before-ccvm"
-      printf '\n# Claude Code VM sandbox anchor\n%s\n%s\n' \
-        "$PF_ANCHOR_REF" "$PF_ANCHOR_LOAD" | sudo tee -a "$PF_CONF" >/dev/null
-    else
-      # Already present — refresh the anchor file it points to.
-      sudo sed -i '' "s|load anchor \"cc-vm\" from .*|${PF_ANCHOR_LOAD}|" "$PF_CONF" 2>/dev/null || true
-    fi
-
-    # Enable pf and load the updated config.
-    sudo pfctl -e 2>/dev/null || true
-    if sudo pfctl -f "$PF_CONF" 2>/dev/null; then
-      log "pf rules loaded. VM subnet ${LIMA_SHARED_SUBNET} is now default-deny."
-      log "Verify: from inside the VM, 'curl https://api.anthropic.com' should work,"
-      log "        and 'curl https://example.com' should be blocked."
-    else
-      warn "pfctl -f failed. Restoring original pf.conf..."
-      sudo cp "${PF_CONF}.before-ccvm" "$PF_CONF" 2>/dev/null || true
-      sudo pfctl -f "$PF_CONF" 2>/dev/null || true
-      warn "pf rules NOT applied. Squid remains the active enforcer."
-    fi
-
-    # Persist across reboots via launchd.
-    PF_LAUNCHD="$STATE_DIR/com.claudevm.pf.plist"
-    cat > "$PF_LAUNCHD" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>            <string>com.claudevm.pf</string>
-  <key>RunAtLoad</key>        <true/>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/sbin/pfctl</string>
-    <string>-e</string>
-  </array>
-</dict>
-</plist>
-PLIST
-    sudo cp "$PF_LAUNCHD" /Library/LaunchDaemons/com.claudevm.pf.plist
-    sudo chown root:wheel /Library/LaunchDaemons/com.claudevm.pf.plist
-    sudo chmod 644 /Library/LaunchDaemons/com.claudevm.pf.plist
-    sudo launchctl load /Library/LaunchDaemons/com.claudevm.pf.plist 2>/dev/null || true
-    log "pf enforcement persists across reboots."
-  fi
-fi
+log "Network enforcement: Squid proxy on port ${PROXY_PORT} (see access log: ${STATE_DIR}/squid-access.log)"
 
 # ----------------------------------------------------------------------------
 # 9. Install the 'ccvm' launcher + alias

@@ -19,7 +19,15 @@ log() { printf '\033[1;36m[vm]\033[0m %s\n' "$*"; }
 CLAUDE_USER="claude"
 PROXY="http://host.lima.internal:${PROXY_PORT}"
 
-# 1. Base packages (network is open during provisioning — Lima default)
+# Set proxy BEFORE any network commands so apt, curl, and all tools route
+# through Squid on the Mac.
+export HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY" http_proxy="$PROXY" https_proxy="$PROXY"
+export NO_PROXY="localhost,127.0.0.1,::1,host.lima.internal"
+mkdir -p /etc/apt/apt.conf.d
+printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' "$PROXY" "$PROXY" \
+  > /etc/apt/apt.conf.d/99ccvm-proxy
+
+# 1. Base packages
 log "Installing base packages..."
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl gnupg git sudo >/dev/null
@@ -88,10 +96,31 @@ sudo -iu "$CLAUDE_USER" git config --global http.proxy  "$PROXY" || true
 sudo -iu "$CLAUDE_USER" git config --global https.proxy "$PROXY" || true
 
 # 8. Claude Code for the claude user
+# Write the install steps to a file and execute the file as the claude user.
+# (Passing a multi-line script inline via `bash -c '...'` is fragile across the
+#  limactl -> sudo -> sudo -iu boundaries; a file avoids all quoting issues.)
 log "Installing Claude Code for '$CLAUDE_USER'..."
-sudo -iu "$CLAUDE_USER" bash -c '
-  if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
-    curl -fsSL https://claude.ai/install.sh | bash
-  fi
-'
+cat > /tmp/cc-install.sh <<'INSTALL'
+#!/bin/bash
+set -e
+if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
+  curl -fsSL https://claude.ai/install.sh | bash
+fi
+INSTALL
+chmod 0755 /tmp/cc-install.sh
+chown "$CLAUDE_USER" /tmp/cc-install.sh
+# -i gives a login shell (so the proxy env from /etc/profile.d is applied);
+# running a file means no inline quoting to corrupt.
+sudo -iu "$CLAUDE_USER" bash /tmp/cc-install.sh || {
+  echo "[vm] First attempt failed; retrying once..."
+  sudo -iu "$CLAUDE_USER" bash /tmp/cc-install.sh
+}
+rm -f /tmp/cc-install.sh
+
+# Verify the install actually landed.
+if sudo -iu "$CLAUDE_USER" bash -lc 'command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ]'; then
+  log "Claude Code installed for '$CLAUDE_USER'."
+else
+  log "WARNING: Claude Code did not install. Check the VM's network/proxy and re-run."
+fi
 log "Provisioning complete."
