@@ -13,6 +13,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 PROXY_PORT="3128"; INSTALL_NODE="true"; INSTALL_PYTHON="true"
 INSTALL_DOCKER="true"; INSTALL_GCLOUD="false"
+NODE_VERSION="20.19.5"        # overridden by setup script via NODE_VERSION conf var
 GATEWAY_IP="192.168.105.1"   # socket_vmnet gateway; overridden by setup script
 for arg in "$@"; do case "$arg" in *=*) export "${arg?}";; esac; done
 
@@ -110,10 +111,17 @@ DP
 fi
 
 # 5. Node + Python
-if [ "$INSTALL_NODE" = "true" ] && ! command -v node >/dev/null 2>&1; then
-  log "Installing Node.js LTS..."
-  curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >/dev/null 2>&1
-  apt-get install -y -qq nodejs >/dev/null
+if [ "$INSTALL_NODE" = "true" ]; then
+  INSTALLED_NODE="$(node --version 2>/dev/null || true)"
+  if [ "$INSTALLED_NODE" != "v${NODE_VERSION}" ]; then
+    log "Installing Node.js ${NODE_VERSION}..."
+    NODE_MAJOR="$(echo "$NODE_VERSION" | cut -d. -f1)"
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >/dev/null 2>&1
+    apt-get install -y -qq "nodejs=${NODE_VERSION}-1nodesource1" >/dev/null 2>&1 \
+      || apt-get install -y -qq nodejs >/dev/null
+  else
+    log "Node.js ${NODE_VERSION} already installed."
+  fi
 fi
 if [ "$INSTALL_PYTHON" = "true" ]; then
   log "Installing Python toolchain..."

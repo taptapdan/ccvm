@@ -347,6 +347,7 @@ limactl shell --workdir /tmp "$VM_NAME" -- sudo tee /root/vm-provision.sh   >/de
 limactl shell --workdir /tmp "$VM_NAME" -- sudo bash /root/vm-provision.sh \
   "PROXY_PORT=${PROXY_PORT}" \
   "GATEWAY_IP=${LIMA_SHARED_GW}" \
+  "NODE_VERSION=${NODE_VERSION}" \
   "INSTALL_NODE=${INSTALL_NODE}" \
   "INSTALL_PYTHON=${INSTALL_PYTHON}" \
   "INSTALL_DOCKER=${INSTALL_DOCKER}" \
