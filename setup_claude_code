@@ -184,16 +184,19 @@ shutdown_lifetime 1 seconds
 SQUID
 
 sudo "$SQUID_BIN" -k shutdown -f "$SQUID_CONF" 2>/dev/null || true
-sleep 1
-sudo "$SQUID_BIN" -f "$SQUID_CONF" 2>/dev/null || true
-sleep 1
-# Verify Squid is actually listening — fail loudly if not.
-if ! sudo lsof -i ":${PROXY_PORT}" | grep -q squid 2>/dev/null; then
-  # Try reconfigure in case a stale process owns the port.
-  sudo "$SQUID_BIN" -k reconfigure -f "$SQUID_CONF" 2>/dev/null || true
+sleep 2
+
+# Start Squid; do NOT suppress stderr so real errors surface.
+sudo "$SQUID_BIN" -f "$SQUID_CONF"
+
+# Wait for Squid to bind the port — retry for up to 10 seconds.
+SQUID_READY="false"
+for _i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
-fi
-sudo lsof -i ":${PROXY_PORT}" | grep -q squid   || die "Squid failed to start on port ${PROXY_PORT}. Check: sudo $SQUID_BIN -f $SQUID_CONF"
+  nc -z 127.0.0.1 "${PROXY_PORT}" 2>/dev/null && { SQUID_READY="true"; break; }
+done
+[ "$SQUID_READY" = "true" ] \
+  || die "Squid did not bind port ${PROXY_PORT} within 10s. Run manually: sudo $SQUID_BIN -N -f $SQUID_CONF"
 log "Squid running on port ${PROXY_PORT}. Access log: ${SQUID_LOG_DIR}/access.log"
 
 # ----------------------------------------------------------------------------
@@ -378,9 +381,9 @@ if [ -f "\$INDEX" ]; then
     [ -n "\$val" ] || { echo "warn: no keychain value for '\$name'; skipping"; continue; }
     if [ "\$name" = "gcp" ]; then
       if [ -f "\$val" ]; then
-        limactl shell --workdir /home/claude "\$VM_NAME" -- sudo -u claude mkdir -p /home/claude/.run-creds
-        limactl shell --workdir /home/claude "\$VM_NAME" -- sudo -u claude tee /home/claude/.run-creds/gcp.json >/dev/null < "\$val"
-        limactl shell --workdir /home/claude "\$VM_NAME" -- sudo -u claude chmod 600 /home/claude/.run-creds/gcp.json
+        limactl shell --workdir /tmp "\$VM_NAME" -- sudo -u claude mkdir -p /home/claude/.run-creds
+        limactl shell --workdir /tmp "\$VM_NAME" -- sudo -u claude tee /home/claude/.run-creds/gcp.json >/dev/null < "\$val"
+        limactl shell --workdir /tmp "\$VM_NAME" -- sudo -u claude chmod 600 /home/claude/.run-creds/gcp.json
         ENV_ARGS+=( "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.run-creds/gcp.json" )
       else
         echo "warn: gcp key path '\$val' not found on Mac; skipping"
@@ -392,9 +395,9 @@ if [ -f "\$INDEX" ]; then
 fi
 
 if [ \${#ENV_ARGS[@]} -gt 0 ]; then
-  exec limactl shell --workdir /home/claude "\$VM_NAME" -- sudo -iu claude env "\${ENV_ARGS[@]}" bash -l
+  exec limactl shell --workdir /tmp "\$VM_NAME" -- sudo -iu claude env "\${ENV_ARGS[@]}" bash -l
 else
-  exec limactl shell --workdir /home/claude "\$VM_NAME" -- sudo -iu claude bash -l
+  exec limactl shell --workdir /tmp "\$VM_NAME" -- sudo -iu claude bash -l
 fi
 LAUNCH
 chmod +x "$LAUNCHER"
