@@ -242,8 +242,13 @@ fi
 #    This keeps provisioning open (a trusted admin operation) while ensuring
 #    pf is in place for all Claude Code runtime sessions.
 # ----------------------------------------------------------------------------
-log "Flushing any existing cc-vm pf rules during provisioning window..."
-sudo pfctl -a cc-vm -F all 2>/dev/null || true
+# Disable pf entirely during provisioning so socket_vmnet's NAT works.
+# When pf is enabled it intercepts all packets; the default com.apple anchor
+# rules do not include NAT for socket_vmnet's subnet, so the VM loses internet
+# access even after flushing the cc-vm anchor. Disabling pf fully restores the
+# socket_vmnet NAT path. pf is re-enabled with our rules after provisioning.
+log "Disabling pf during provisioning window (re-enabled after provisioning)..."
+sudo pfctl -d 2>/dev/null || true
 
 # ----------------------------------------------------------------------------
 # 7. Push allowlist + provisioner into the VM and run it (idempotent)
