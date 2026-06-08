@@ -237,13 +237,36 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 6. pf backstop: block VM raw-IP egress via the socket_vmnet bridge interface
-#
+# 6. Flush any existing cc-vm pf rules so the provisioner (step 7) can reach
+#    the internet. pf is re-applied after provisioning completes (step 8).
+#    This keeps provisioning open (a trusted admin operation) while ensuring
+#    pf is in place for all Claude Code runtime sessions.
+# ----------------------------------------------------------------------------
+log "Flushing any existing cc-vm pf rules during provisioning window..."
+sudo pfctl -a cc-vm -F all 2>/dev/null || true
+
+# ----------------------------------------------------------------------------
+# 7. Push allowlist + provisioner into the VM and run it (idempotent)
+#    Network is open here: Lima NAT routes VM traffic directly to the internet.
+#    The provisioner installs Docker, Node, Python, Claude Code, and wires the
+#    proxy env for runtime use. pf is applied afterward (step 8).
+# ----------------------------------------------------------------------------
+log "Provisioning the VM (install + wiring). Runs every time; idempotent."
+limactl shell --workdir /tmp "$VM_NAME" -- sudo tee /root/allowed_domains.txt >/dev/null < "$ALLOWLIST"
+limactl shell --workdir /tmp "$VM_NAME" -- sudo tee /root/vm-provision.sh   >/dev/null < "$PROVISION"
+limactl shell --workdir /tmp "$VM_NAME" -- sudo bash /root/vm-provision.sh \
+  "PROXY_PORT=${PROXY_PORT}" \
+  "INSTALL_NODE=${INSTALL_NODE}" \
+  "INSTALL_PYTHON=${INSTALL_PYTHON}" \
+  "INSTALL_DOCKER=${INSTALL_DOCKER}" \
+  "INSTALL_GCLOUD=${INSTALL_GCLOUD}"
+
+# ----------------------------------------------------------------------------
+# 8. pf backstop: block VM raw-IP egress via the socket_vmnet bridge interface
+#    Applied AFTER provisioning so installs are not blocked.
 #    socket_vmnet puts the VM on a real kernel bridge. pf sees traffic FROM
 #    the VM with source IPs in 192.168.105.0/24 BEFORE NAT, so we can match
 #    and drop traffic that isn't heading to the proxy or Lima's DNS resolver.
-#
-#    Rules are written to /etc/pf.anchors/cc-vm and referenced from pf.conf.
 #    Your Mac's own traffic (source: your Mac's IP) never matches these rules.
 # ----------------------------------------------------------------------------
 if [ "$NEEDS_RECREATE" != "skipped" ]; then
@@ -342,20 +365,7 @@ PLIST
 fi
 
 # ----------------------------------------------------------------------------
-# 7. Push allowlist + provisioner into the VM and run it (idempotent)
-# ----------------------------------------------------------------------------
-log "Provisioning the VM (install + wiring). Runs every time; idempotent."
-limactl shell --workdir /root "$VM_NAME" -- sudo tee /root/allowed_domains.txt >/dev/null < "$ALLOWLIST"
-limactl shell --workdir /root "$VM_NAME" -- sudo tee /root/vm-provision.sh   >/dev/null < "$PROVISION"
-limactl shell --workdir /root "$VM_NAME" -- sudo bash /root/vm-provision.sh \
-  "PROXY_PORT=${PROXY_PORT}" \
-  "INSTALL_NODE=${INSTALL_NODE}" \
-  "INSTALL_PYTHON=${INSTALL_PYTHON}" \
-  "INSTALL_DOCKER=${INSTALL_DOCKER}" \
-  "INSTALL_GCLOUD=${INSTALL_GCLOUD}"
-
-# ----------------------------------------------------------------------------
-# 8. Install the 'ccvm' launcher + alias
+# 9. Install the 'ccvm' launcher + alias
 # ----------------------------------------------------------------------------
 LAUNCHER="$STATE_DIR/ccvm-launch.sh"
 cat > "$LAUNCHER" <<LAUNCH
