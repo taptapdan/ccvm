@@ -53,8 +53,14 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 command -v brew    >/dev/null 2>&1 || die "Homebrew not on PATH. Open a new terminal and re-run."
 command -v limactl           >/dev/null 2>&1 || { log "Installing Lima...";  brew install lima; }
-command -v squid              >/dev/null 2>&1 || { log "Installing Squid..."; brew install squid; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { log "Installing QEMU...";  brew install qemu; }
+# Squid installs to $(brew --prefix)/sbin/squid which is NOT in sudo's secure
+# PATH on Intel Mac (/usr/local/sbin). Resolve the full path explicitly.
+if ! brew list squid >/dev/null 2>&1; then
+  log "Installing Squid..."; brew install squid
+fi
+SQUID_BIN="$(brew --prefix)/sbin/squid"
+[ -x "$SQUID_BIN" ] || die "Squid binary not found at $SQUID_BIN"
 
 # 1a. socket_vmnet — must be installed from SOURCE to /opt/socket_vmnet.
 # ----------------------------------------------------------------------------
@@ -163,11 +169,18 @@ pid_filename ${STATE_DIR}/squid.pid
 shutdown_lifetime 1 seconds
 SQUID
 
-sudo squid -k shutdown -f "$SQUID_CONF" 2>/dev/null || true
+sudo "$SQUID_BIN" -k shutdown -f "$SQUID_CONF" 2>/dev/null || true
 sleep 1
-sudo squid -f "$SQUID_CONF" 2>/dev/null \
-  || sudo squid -k reconfigure -f "$SQUID_CONF" 2>/dev/null || true
-log "Squid running. Access log: ${STATE_DIR}/squid-access.log"
+sudo "$SQUID_BIN" -f "$SQUID_CONF" 2>/dev/null || true
+sleep 1
+# Verify Squid is actually listening — fail loudly if not.
+if ! sudo lsof -i ":${PROXY_PORT}" | grep -q squid 2>/dev/null; then
+  # Try reconfigure in case a stale process owns the port.
+  sudo "$SQUID_BIN" -k reconfigure -f "$SQUID_CONF" 2>/dev/null || true
+  sleep 1
+fi
+sudo lsof -i ":${PROXY_PORT}" | grep -q squid   || die "Squid failed to start on port ${PROXY_PORT}. Check: sudo $SQUID_BIN -f $SQUID_CONF"
+log "Squid running on port ${PROXY_PORT}. Access log: ${STATE_DIR}/squid-access.log"
 
 # ----------------------------------------------------------------------------
 # 4. Generate the Lima YAML (with socket_vmnet shared networking)
