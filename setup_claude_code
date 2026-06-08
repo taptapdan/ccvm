@@ -226,8 +226,15 @@ echo "    writable: false"
 if [ -n "$SHARED_DIR" ]; then
   mkdir -p "$SHARED_DIR"
   # 9p mounts pass uids through directly. claude (uid 1000 in VM) differs from
-  # your Mac uid, so chmod 777 lets the claude user read and write the folder.
+  # your Mac uid. We need world-write on the directory and all its contents.
+  #
+  # Set a macOS ACL with file_inherit + directory_inherit so every new file
+  # or folder created inside automatically inherits world-write permission.
+  # This is scoped only to SHARED_DIR — no other folders are affected.
+  chmod +a "everyone allow read,write,execute,delete,add_file,add_subdirectory,delete_child,file_inherit,directory_inherit" "$SHARED_DIR"
+  # Also fix existing files/dirs so they are writable right now.
   chmod 777 "$SHARED_DIR"
+  chmod -R o+w "$SHARED_DIR"
   echo "  - location: \"${SHARED_DIR}\""
   echo "    mountPoint: \"/home/claude/shared\""
   echo "    writable: ${SHARED_WRITABLE}"
