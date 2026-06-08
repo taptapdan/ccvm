@@ -47,7 +47,6 @@ for _f in .bashrc .bash_logout .profile; do
 done
 # Chown the home dir and dotfiles; skip the shared submount (Mac-owned).
 chown "$CLAUDE_USER:$CLAUDE_USER" "/home/$CLAUDE_USER"
-install -d -o "$CLAUDE_USER" -g "$CLAUDE_USER" "/home/$CLAUDE_USER/projects"
 # The shared folder is a 9p mount owned by the Mac user (different uid from claude).
 # chmod 777 here sets the in-VM permissions so claude can read and write it.
 if [ -d "/home/$CLAUDE_USER/shared" ]; then
