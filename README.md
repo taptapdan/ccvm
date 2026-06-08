@@ -3,8 +3,8 @@
 Runs Claude Code inside a disposable Linux VM. Your Mac's files, credentials,
 and system are never reachable from inside. Inside the VM, Claude has full
 freedom (Docker, Node, Python, package installs, container builds). The VM wall
-is the security boundary. Outbound network is default-deny, enforced by a proxy
-on your Mac that the VM cannot tamper with.
+is the security boundary. Outbound network is enforced by a Squid proxy on your
+Mac that the VM cannot tamper with.
 
 ---
 
@@ -14,17 +14,17 @@ on your Mac that the VM cannot tamper with.
 Your Mac (admin account)
 ├── Lima            — manages the VM, nothing else
 ├── Squid           — network enforcer (filtering proxy), on the Mac
-├── pf              — packet filter, raw-IP egress backstop
+├── socket_vmnet    — kernel-visible bridge network for the VM
 ├── macOS keychain  — stores all credential values, encrypted at rest
 │
-└── Linux VM (x86_64 Ubuntu 24.04, native on Intel)
-    ├── claude user (non-root, no sudo) — runs Claude Code
-    │   ├── Claude Code
+└── Linux VM (x86_64 Ubuntu 24.04, qemu)
+    ├── claude user (non-root) — runs Claude Code
+    │   ├── Claude Code        (all permissions enabled, no prompts)
     │   ├── Docker + Compose
     │   ├── Node.js LTS
     │   ├── Python 3 + pip + venv
-    │   └── gcloud (optional)
-    └── No proxy, no firewall, no persisted credentials inside the VM
+    │   └── gcloud (optional, set INSTALL_GCLOUD=true)
+    └── No proxy or firewall inside the VM — enforcement is Mac-side
 ```
 
 ---
@@ -49,29 +49,38 @@ chmod +x setup_claude_code vm-provision.sh manage_credentials
 ./setup_claude_code
 ```
 
-Installs Homebrew (if needed), Lima, and Squid; downloads Ubuntu; builds the
-VM; installs the stack; configures the Mac-side proxy. First build takes a few
-minutes. Run as your normal admin user — **not** with sudo.
+Installs Homebrew (if needed), Lima, QEMU, Squid, and socket_vmnet; builds the
+VM; installs the dev stack; configures the Mac-side proxy. Ubuntu is downloaded
+once and cached — rebuilds take about a minute. Run as your normal admin user —
+**not** with sudo.
 
-Then open a **new terminal** (to pick up the `ccvm` alias) and:
+Then open a **new terminal** (to pick up the `ccvm` alias):
 
 ```bash
-ccvm           # enter the VM as the non-root 'claude' user
-claude         # start Claude Code; first time only, run /login once
+ccvm      # enter the VM as the claude user
+claude    # start Claude Code
 ```
+
+**First-time authentication:** Claude Code will show "Unable to connect" on the
+very first launch. This is expected — you need to log in:
+
+1. Run `claude` inside the VM
+2. Type `/login` at the prompt
+3. Choose "Claude.ai" and follow the browser link
+4. After login, run `claude` again — it connects normally from then on
 
 ---
 
 ## Daily workflow
 
 ```bash
-ccvm           # enters the VM, injecting any env/file credentials for the session
-claude         # full Claude Code terminal UI, exactly as in Anthropic's demo
+ccvm      # enter the VM (starts it if stopped, injects credentials)
+claude    # full Claude Code terminal UI — no permission prompts
 ```
 
-`ccvm` starts the VM if needed, pulls credentials from the keychain, injects
-env-type credentials and mounts the GCP key file (if configured) for the
-session, and drops you in as `claude`.
+Claude Code is configured to allow all actions without asking for confirmation.
+The VM is the security boundary; prompts inside it add friction without
+meaningful protection.
 
 ---
 
@@ -79,88 +88,69 @@ session, and drops you in as `claude`.
 
 Edit `claude-vm.conf`, then re-run `./setup_claude_code`.
 
-- Allowlist, forwarded ports, shared folder, installed tools → applied live.
+- Allowlist, ports, shared folder, installed tools → applied live.
 - CPU / memory / disk → `limactl stop claude-dev` first, then re-run.
 
 ---
 
 ## Network security
 
-Two layers, both enforced on your Mac where VM root can't touch them.
+**Squid proxy on your Mac** is the network enforcer. All traffic from the VM
+routes through it via `HTTP_PROXY` env set inside the VM. Squid allows only the
+domains listed in `claude-vm.conf` and blocks everything else.
 
-**Layer 1 — Squid proxy (primary, domain-aware enforcer).**
-The VM's tools are configured to route all traffic through Squid on your Mac
-(`host.lima.internal:3128`). Squid allows only the domains in `claude-vm.conf`
-and refuses everything else. Effective against any tool that honors the proxy
-env (Claude Code, npm, pip, git, curl, docker pull).
+Because enforcement runs on your Mac, VM root cannot modify or bypass it — even
+a deliberately hostile process inside the VM can only reach what Squid allows.
 
-**Layer 2 — pf firewall (backstop against raw-IP bypass).**
-`socket_vmnet` puts the VM on a kernel-visible bridge interface. pf rules on
-that bridge drop traffic from the VM's subnet (`192.168.105.0/24`) to anywhere
-except the Squid proxy port and Lima's DNS resolver. Even a process that
-deliberately bypasses the proxy env and connects to a raw IP is dropped here,
-before NAT, before the packet can leave your Mac.
+The allowlist has two sections in `claude-vm.conf`:
 
-**Why socket_vmnet matters:** Lima's default `usernet` mode routes VM traffic
-through Lima's own userspace process, so pf never sees the VM's source IPs —
-the backstop can't work. `socket_vmnet` creates a real kernel bridge; pf sees
-the VM's IPs and can filter on them. The Lima sudoers entry lets Lima manage
-this interface without prompting for a password on every VM start.
-
-**Your Mac's traffic is never affected.** The pf rules match only on source
-addresses in `192.168.105.0/24` (the VM's subnet). Your Mac's traffic has a
-different source address and is never touched by these rules.
+- `PROTECTED_DOMAINS` — Anthropic API/auth/telemetry plus provisioning domains
+  (apt, Docker, Node). Do not remove these or Claude Code will stop working.
+- `ALLOWED_DOMAINS` — your development domains. Start narrow and add as needed.
 
 The allowlist convention: `.example.com` matches the domain and all subdomains;
-`host.example.com` matches that exact host. The `PROTECTED_DOMAINS` block
-(Anthropic API/auth/telemetry) must stay or Claude Code won't start.
+`host.example.com` matches that exact host.
 
 Watch what the VM is reaching (including blocked attempts):
 
 ```bash
-tail -f ~/.claude-vm/squid-access.log
-```
-
-To remove the pf rules completely (e.g. if you no longer use the VM):
-
-```bash
-sudo pfctl -a cc-vm -F all
-sudo sed -i '' '/cc-vm/d' /etc/pf.conf
-sudo launchctl unload /Library/LaunchDaemons/com.claudevm.pf.plist
-sudo rm /Library/LaunchDaemons/com.claudevm.pf.plist
+tail -f /usr/local/var/log/squid/access.log
 ```
 
 ---
 
 ## Credentials (summary — full detail in CREDENTIALS.md)
 
-Values live only in the macOS keychain. Two delivery mechanisms:
-
-- **env** — injected as an environment variable into the `ccvm` session, in
-  memory only, gone on exit. Default and recommended.
-- **proxy** — value stays on the Mac; Squid injects it into HTTPS requests to a
-  named domain (requires scoped TLS interception — see CREDENTIALS.md).
+Values live only in the macOS keychain, never on disk.
 
 ```bash
 ./manage_credentials add github          # env, GITHUB_TOKEN (built-in default)
 ./manage_credentials add gcp             # env, mounts your JSON key for the session
-./manage_credentials add stripe --type=proxy
 ./manage_credentials list
 ./manage_credentials remove github
 ```
 
-For Anthropic on a Pro/Max plan, just run `/login` once inside Claude Code — no
-credential entry needed.
+For Anthropic on a Pro/Max plan, run `/login` once inside Claude Code — no
+credential entry needed. Credentials are injected into the VM session in memory
+only and are gone when you close the session.
 
 ---
 
 ## Shared folder
 
-One directory on your Mac (`SHARED_DIR` in the config), mounted into the VM at
-`/home/claude/shared`, writable. Your way to move files in and out. Everything
-else — projects, credentials, config — stays inside the VM. Leave it empty for
-maximum isolation. Anything Claude can do in the VM, it can do to that folder,
-so keep it scoped to the current project rather than a broad code directory.
+Set `SHARED_DIR` in `claude-vm.conf` to a folder on your Mac. It appears inside
+the VM at `/home/claude/shared`, writable by the claude user.
+
+```bash
+SHARED_DIR="$HOME/code/my-project"
+```
+
+The setup script automatically sets the correct permissions (including an
+inheritable macOS ACL) so that files you add to the folder later are
+immediately writable from inside the VM — no manual `chmod` needed.
+
+Keep the shared folder scoped to your current project. Claude can read and write
+anything in it, including files on your Mac.
 
 ---
 
@@ -176,66 +166,39 @@ FORWARD_PORTS=(
 )
 ```
 
-- `network` → binds `0.0.0.0` on your Mac; reach it from another workstation at
-  `http://<your-mac-ip>:8888` or `http://<your-mac-name>.local:8888`.
-- `local` → binds `127.0.0.1`; your Mac only.
+- `network` → reachable from another workstation at `http://<mac-name>.local:8888`
+- `local` → your Mac only
 
-No VPN or tunneling needed on the other device. Two gotchas: services inside the
-VM must bind to `0.0.0.0` (not `127.0.0.1`) to be reachable; and your Mac's WiFi
-IP can change (DHCP) — use the `.local` hostname or set a static IP for a stable
-address.
+Services inside the VM must bind to `0.0.0.0` (not `127.0.0.1`) to be reachable
+from outside. Your Mac's `.local` hostname is stable; the WiFi IP can change.
 
 ---
 
 ## Security guarantees and honest limits
 
-**Absolute (does not depend on anything inside the VM behaving):**
+**Absolute:**
 - The VM's filesystem is fully isolated from your Mac. Claude cannot see your
   home directory, SSH keys, browser, or any Mac files.
-- Credential values are never written to disk by these scripts; they live in the
-  keychain. env credentials exist only in session memory; the GCP key file is
-  recreated each session and is not part of the VM image.
+- Credential values are never written to disk; they live in the keychain and
+  exist in session memory only.
 
 **Strong (covers the realistic threat):**
-- Network enforcement is on the Mac, outside VM root's reach. It fully stops
-  accidental or prompt-injected egress to unlisted domains.
+- Network enforcement is on the Mac, outside VM root's reach. Stops accidental
+  or prompt-injected egress to unlisted domains entirely.
 
 **Conscious trade-offs:**
 - `network`-labelled ports are reachable by any device on your WiFi. Fine for
-  local dev services with no real data; be aware on shared/public networks.
-- Claude Code auto-updates from Anthropic's servers (on the allowlist). You're
+  local dev with no real data; be aware on shared/public networks.
+- Claude Code auto-updates from Anthropic's servers (on the allowlist). You are
   trusting Anthropic's release process on an ongoing basis.
-- Docker inside the VM is root-equivalent *within the VM*. A deliberately
-  hostile process could manipulate in-VM state, but the Mac-side enforcement
-  (Squid, pf) is unaffected.
-- Proxy-injected credentials require decrypting traffic to those specific
-  domains on your Mac (scoped TLS interception). env injection avoids this.
+- Docker inside the VM is root-equivalent within the VM. A deliberately hostile
+  process could manipulate in-VM state; Mac-side Squid enforcement is unaffected.
+- The shared folder is a deliberate opening between Mac and VM. Keep it scoped.
+- All Claude Code permission prompts are suppressed. The VM boundary is the
+  safety layer, not in-app prompts.
 
-**Trust root:** Lima, Squid, and pf run under your Mac admin account. This is
-unavoidable and the same trust assumption as any software you run.
-
----
-
-## First-run verification (important)
-
-These scripts are syntax-checked, but the Mac↔VM networking is the part that
-varies by machine and that I could not test for your exact setup. On first run,
-verify enforcement from inside the VM:
-
-```bash
-ccvm
-curl -sS -o /dev/null -w "%{http_code}\n" https://api.anthropic.com   # expect a 2xx/4xx (reached)
-curl -sS -o /dev/null -w "%{http_code}\n" https://example.com         # expect failure/blocked
-```
-
-If an install is blocked, check `~/.claude-vm/squid-access.log`, add the domain
-to `claude-vm.conf`, and re-run `./setup_claude_code`.
-
-Likely first-run adjustments:
-- If the VM won't boot, change `vmType: "vz"` to `"qemu"` in
-  `~/.claude-vm/claude-dev.lima.yaml` (or ask and I'll parameterize it).
-- The `pf` raw-IP backstop is the piece most likely to need per-machine tuning;
-  Squid is the primary enforcer and works regardless.
+**Trust root:** Lima and Squid run under your Mac admin account — the same trust
+assumption as any software you run.
 
 ---
 
@@ -244,15 +207,16 @@ Likely first-run adjustments:
 - Intel Mac, macOS 13.0 (Ventura) or later
 - Paid Anthropic plan (Pro / Max / Team / Enterprise / Console)
 - ~10 GB free disk
-- Homebrew (the setup script installs it if missing; `socket_vmnet`, `lima`,
-  and `squid` are installed automatically from Homebrew)
+- Homebrew (the setup script installs it if missing)
+
+---
 
 ## Useful commands
 
 ```bash
-limactl list                  # VM status
-limactl stop claude-dev       # shut down
-limactl start claude-dev      # bring back
-limactl delete claude-dev     # destroy (rebuild with ./setup_claude_code)
-tail -f ~/.claude-vm/squid-access.log   # live network log
+limactl list                               # VM status
+limactl stop claude-dev                    # shut down
+limactl start claude-dev                   # bring back
+limactl delete claude-dev                  # destroy (rebuild with ./setup_claude_code)
+tail -f /usr/local/var/log/squid/access.log  # live network log
 ```
