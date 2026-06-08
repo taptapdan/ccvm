@@ -13,11 +13,14 @@ export DEBIAN_FRONTEND=noninteractive
 
 PROXY_PORT="3128"; INSTALL_NODE="true"; INSTALL_PYTHON="true"
 INSTALL_DOCKER="true"; INSTALL_GCLOUD="false"
+GATEWAY_IP="192.168.105.1"   # socket_vmnet gateway; overridden by setup script
 for arg in "$@"; do case "$arg" in *=*) export "${arg?}";; esac; done
 
 log() { printf '\033[1;36m[vm]\033[0m %s\n' "$*"; }
 CLAUDE_USER="claude"
-PROXY="http://host.lima.internal:${PROXY_PORT}"
+# Use socket_vmnet gateway (192.168.105.1), NOT host.lima.internal which
+# resolves to the usernet gateway (192.168.5.2) where Squid is not listening.
+PROXY="http://${GATEWAY_IP}:${PROXY_PORT}"
 
 # Set proxy BEFORE any network commands so apt, curl, and all tools route
 # through Squid on the Mac.

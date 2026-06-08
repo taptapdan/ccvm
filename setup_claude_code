@@ -305,6 +305,7 @@ limactl shell --workdir /tmp "$VM_NAME" -- sudo tee /root/allowed_domains.txt >/
 limactl shell --workdir /tmp "$VM_NAME" -- sudo tee /root/vm-provision.sh   >/dev/null < "$PROVISION"
 limactl shell --workdir /tmp "$VM_NAME" -- sudo bash /root/vm-provision.sh \
   "PROXY_PORT=${PROXY_PORT}" \
+  "GATEWAY_IP=${LIMA_SHARED_GW}" \
   "INSTALL_NODE=${INSTALL_NODE}" \
   "INSTALL_PYTHON=${INSTALL_PYTHON}" \
   "INSTALL_DOCKER=${INSTALL_DOCKER}" \
