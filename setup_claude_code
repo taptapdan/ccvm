@@ -143,7 +143,15 @@ ALLOWLIST="$STATE_DIR/allowed_domains.txt"
   printf '%s\n' "${PROVISIONING_DOMAINS[@]}"
   printf '%s\n' "${ALLOWED_DOMAINS[@]}"
   [ -f "$STATE_DIR/proxy_domains.txt" ] && cat "$STATE_DIR/proxy_domains.txt" || true
-} | sed '/^$/d' | sort -u > "$ALLOWLIST"
+} | sed '/^$/d' | sort -u | python3 -c "
+import sys
+lines = [l.strip() for l in sys.stdin if l.strip()]
+# Remove exact-host entries that are already covered by a wildcard (.domain)
+wildcards = {l[1:] for l in lines if l.startswith('.')}
+filtered = [l for l in lines if l.startswith('.') or not any(
+    l == d or l.endswith('.' + d) for d in wildcards)]
+print('\n'.join(filtered))
+" > "$ALLOWLIST"
 log "Allowlist: $(wc -l < "$ALLOWLIST" | tr -d ' ') domain rules."
 
 # ----------------------------------------------------------------------------
@@ -152,6 +160,11 @@ log "Allowlist: $(wc -l < "$ALLOWLIST" | tr -d ' ') domain rules."
 # ----------------------------------------------------------------------------
 log "Configuring Squid on the Mac (port ${PROXY_PORT})..."
 SQUID_CONF="$STATE_DIR/squid.conf"
+# Squid drops to 'nobody' after start; log/pid dirs must be writable by nobody.
+# Homebrew's /usr/local/var/log/squid/ is already owned by nobody.
+SQUID_LOG_DIR="/usr/local/var/log/squid"
+sudo mkdir -p "$SQUID_LOG_DIR"
+sudo chown nobody "$SQUID_LOG_DIR"
 cat > "$SQUID_CONF" <<SQUID
 http_port 0.0.0.0:${PROXY_PORT}
 acl cc_allowed dstdomain "${ALLOWLIST}"
@@ -164,8 +177,9 @@ http_access deny CONNECT !SSL_ports
 http_access allow cc_allowed
 http_access deny all
 cache deny all
-access_log stdio:${STATE_DIR}/squid-access.log
-pid_filename ${STATE_DIR}/squid.pid
+access_log stdio:${SQUID_LOG_DIR}/access.log
+pid_filename ${SQUID_LOG_DIR}/squid.pid
+coredump_dir ${SQUID_LOG_DIR}
 shutdown_lifetime 1 seconds
 SQUID
 
@@ -180,7 +194,7 @@ if ! sudo lsof -i ":${PROXY_PORT}" | grep -q squid 2>/dev/null; then
   sleep 1
 fi
 sudo lsof -i ":${PROXY_PORT}" | grep -q squid   || die "Squid failed to start on port ${PROXY_PORT}. Check: sudo $SQUID_BIN -f $SQUID_CONF"
-log "Squid running on port ${PROXY_PORT}. Access log: ${STATE_DIR}/squid-access.log"
+log "Squid running on port ${PROXY_PORT}. Access log: ${SQUID_LOG_DIR}/access.log"
 
 # ----------------------------------------------------------------------------
 # 4. Generate the Lima YAML (with socket_vmnet shared networking)
